@@ -9,15 +9,22 @@
 #include <map>
 #include <set>
 #include <optional>
+#include <limits>
+#include <algorithm>
 #include <stdexcept>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 
 const uint32_t WIDTH  = 800;
 const uint32_t HEIGHT = 600;
 
 const std::vector<const char*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation",
+};
+
+const std::vector<const char*> deviceExtensions = {
+	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
 #ifdef NDEBUG
@@ -81,6 +88,12 @@ private:
 	// window surfaceへの表示コマンドキューへのハンドル
 	VkQueue _presentQueue;
 
+	VkSwapchainKHR _swapChain;
+	// NOTE: imageの生成、破棄はswap chainが行う
+	std::vector<VkImage> _swapChainImages;
+	VkFormat _swapChainImageFormat;
+	VkExtent2D _swapChainExtent;
+
 	struct QueueFamilyIndices {
 		std::optional<uint32_t> graphicsFamily;
 		std::optional<uint32_t> presentFamily;
@@ -88,6 +101,16 @@ private:
 		bool isComplete() {
 			return graphicsFamily.has_value() && presentFamily.has_value();
 		}
+	};
+
+	// window surfaceとswap chainの互換性チェックの為
+	struct SwapChainSupportDetails {
+		// swap chain内の画像の最小・最大数、最小・最大幅と高さ、等
+		VkSurfaceCapabilitiesKHR capabilities;
+		// ピクセル形式、色空間
+		std::vector<VkSurfaceFormatKHR> formats;
+		// 利用可能なpresentation mode(?)
+		std::vector<VkPresentModeKHR> presentModes;
 	};
 
 	void initWindow() {
@@ -117,11 +140,76 @@ private:
 		createSurface();
 		pickPhysicalDevice();
 		createLogicalDevice();
+		createSwapChain(); // 論理デバイス作成後に呼ぶ
+	}
 
-		/* Queue handleの取得
+	// NOTE: 論理デバイス作成後に呼び出されることを期待
+	void createSwapChain() {
+		SwapChainSupportDetails swapChainSupport = querySwapChainSupport(_physicalDevice);
+
+		VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+		VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
+		VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
+
+		// swap chainに含める画像の数
+		// NOTE: ドライバ内部処理の完了待機を避ける為、minImageCountよりも多い画像を含める
+		uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+
+		// 画像の数に上限がある時
+		// NOTE: 上限がない時、maxImageCount == 0
+		if (swapChainSupport.capabilities.maxImageCount > 0) {
+			// 画像の数が最大値を超えないよう調整
+			if (imageCount > swapChainSupport.capabilities.maxImageCount) {
+				imageCount = swapChainSupport.capabilities.maxImageCount;
+			}
+		}
+
+		// create Infoの作成
+		VkSwapchainCreateInfoKHR createInfo{};
+		createInfo.sType			= VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+		createInfo.surface			= _surface;
+		createInfo.minImageCount	= imageCount;
+		createInfo.imageFormat		= surfaceFormat.format;
+		createInfo.imageColorSpace  = surfaceFormat.colorSpace;
+		createInfo.imageExtent		= extent;
+		createInfo.imageArrayLayers = 1; // 各画像を構成するレイヤーの数。stereoscopic 3Dアプリでない限り、1となる
+		createInfo.imageUsage		= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; // swap chain内の画像への操作方法
+
 		QueueFamilyIndices indices = findQueueFamilies(_physicalDevice);
-		vkGetDeviceQueue(_device, indices.graphicsFamily.value(), 0, &_graphicsQueue);
-		*/
+		uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
+
+		if (indices.graphicsFamily != indices.presentFamily) {
+			// 画像は、複数のキューファミリで使用できる
+			createInfo.imageSharingMode		 = VK_SHARING_MODE_CONCURRENT;
+			createInfo.queueFamilyIndexCount = 2;
+			createInfo.pQueueFamilyIndices   = queueFamilyIndices;
+		}
+		else {
+			// 画像は、1度に1つのキューファミリに所有される。パフォーマンス良し。
+			// 別のキューファミリに使用される際、所有権の明示的譲渡が必要
+			createInfo.imageSharingMode		 = VK_SHARING_MODE_EXCLUSIVE;
+
+			// 以下は複数のキューファミリ用なので、ここでは必要なし
+			createInfo.queueFamilyIndexCount = 0;
+			createInfo.pQueueFamilyIndices   = nullptr;
+		}
+
+		createInfo.preTransform   = swapChainSupport.capabilities.currentTransform;
+		createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+		createInfo.presentMode	  = presentMode;
+		createInfo.clipped		  = VK_TRUE; // 別windowで隠れている等で見えていないピクセルを考慮しない
+		createInfo.oldSwapchain   = VK_NULL_HANDLE;
+
+		VkResult result = vkCreateSwapchainKHR(_device, &createInfo, nullptr, &_swapChain);
+		if (result != VK_SUCCESS) {
+			throw std::runtime_error("failed to create swap chain!");
+		}
+
+		vkGetSwapchainImagesKHR(_device, _swapChain, &imageCount, nullptr);
+		_swapChainImages.resize(imageCount);
+		vkGetSwapchainImagesKHR(_device, _swapChain, &imageCount, _swapChainImages.data());
+		_swapChainImageFormat = surfaceFormat.format;
+		_swapChainExtent = extent;
 	}
 
 	void createSurface() {
@@ -158,7 +246,8 @@ private:
 
 		createInfo.pEnabledFeatures = &deviceFeatures;
 
-		createInfo.enabledExtensionCount = 0;
+		createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+		createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
 		// NOTE: 現在はVkInstanceとVkDeviceのvalidation layerが区別されていない
 		//       よってenabledLayerCountとppEnabledLayerNamesは無視される
@@ -247,6 +336,55 @@ private:
 		return score;
 	}
 
+	// swap chainの最適なformatを選択する
+	VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
+		for (const auto& availableFormat : availableFormats) {
+			if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+				return availableFormat;
+			}
+		}
+
+		return availableFormats[0];
+	}
+
+	// swap chainの最適なpresentation modeを選択する
+	/* ======== presentation mode 一覧 ==================
+	VK_PRESENT_MODE_IMMEDIATE_KHR    : appが送信した画像を直ちに表示する。ティアリングを引き起こしうる。
+	VK_PRESENT_MODE_FIFO_KHR		 : キュー構造。renderingした画像をenqueueし、ディスプレイがdequeueして表示する。キューが空の時、待機する。
+	VK_PRESENT_MODE_FIFO_RELAXED_KHR : キューが空の時、appが送信した画像を直ちに表示する以外は1つ前と同じ。ティアリングを引き起こしうる。
+	VK_PRESENT_MODE_MAILBOX_KHR      : キューが一杯の時、ブロッキングせずにキュー内の画像を新しいものに置き換える。所謂トリプルバッファリング。
+	=================================================== */
+	VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
+		for (const auto& availablePresentMode : availablePresentModes) {
+			if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
+				return availablePresentMode;
+			}
+		}
+
+		return VK_PRESENT_MODE_FIFO_KHR;
+	}
+
+	// swap chainの解像度選択
+	VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) {
+		if (capabilities.currentExtent.width != (std::numeric_limits<uint32_t>::max)()) {
+			return capabilities.currentExtent;
+		}
+		else {
+			int width, height;
+			glfwGetFramebufferSize(_window, &width, &height);
+
+			VkExtent2D actualExtent = {
+				static_cast<uint32_t>(width),
+				static_cast<uint32_t>(height)
+			};
+
+			actualExtent.width = std::clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+			actualExtent.height = std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+
+			return actualExtent;
+		}
+	}
+
 	// デバイスが適合しているか？
 	bool isDeviceSuitable(VkPhysicalDevice device) {
 		/* 例: ジオメトリシェーダーが載ったdGPUのみサポートする場合
@@ -261,7 +399,34 @@ private:
 
 		QueueFamilyIndices indices = findQueueFamilies(device);
 
-		return indices.isComplete();
+		bool extensionsSupported = checkDeviceExtensionSupport(device);
+
+		bool swapChainAdequate = false;
+		// 拡張機能が利用可能であることを確認した後、swap chainの照会をする
+		if (extensionsSupported) {
+			SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device);
+			swapChainAdequate = !swapChainSupport.formats.empty() &&
+								!swapChainSupport.presentModes.empty();
+		}
+
+		return indices.isComplete() && extensionsSupported && swapChainAdequate;
+	}
+
+	// アプリに必要な拡張機能(deviceExtensions, const std::vectorとしてソース冒頭で宣言)をdeviceがサポートしているか？
+	bool checkDeviceExtensionSupport(VkPhysicalDevice device) {
+		uint32_t extensionCount = 0;
+		vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+
+		std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+		vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
+
+		std::set<std::string> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
+
+		for (const auto& extension : availableExtensions) {
+			requiredExtensions.erase(extension.extensionName);
+		}
+
+		return requiredExtensions.empty();
 	}
 
 	// すべてのキューファミリを検索する
@@ -300,6 +465,32 @@ private:
 		return indices;
 	}
 
+	// swap chainのサポート内容を照会(query)する
+	SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device) {
+		SwapChainSupportDetails details;
+		
+		// surface機能(画像の最小・最大数、等)の照会
+		vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, _surface, &details.capabilities);
+
+		// format(色空間等)の照会
+		uint32_t formatCount = 0;
+		vkGetPhysicalDeviceSurfaceFormatsKHR(device, _surface, &formatCount, nullptr);
+		if (formatCount != 0) {
+			details.formats.resize(formatCount);
+			vkGetPhysicalDeviceSurfaceFormatsKHR(device, _surface, &formatCount, details.formats.data());
+		}
+
+		// presentation modeの照会
+		uint32_t presentModeCount = 0;
+		vkGetPhysicalDeviceSurfacePresentModesKHR(device, _surface, &presentModeCount, nullptr);
+		if (presentModeCount != 0) {
+			details.presentModes.resize(presentModeCount);
+			vkGetPhysicalDeviceSurfacePresentModesKHR(device, _surface, &presentModeCount, details.presentModes.data());
+		}
+
+		return details;
+	}
+
 	void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo) {
 		createInfo = {};
 		createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -328,6 +519,8 @@ private:
 	}
 
 	void cleanup() {
+		vkDestroySwapchainKHR(_device, _swapChain, nullptr);
+
 		vkDestroyDevice(_device, nullptr);
 
 		if (enableValidationLayers) {
