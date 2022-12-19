@@ -19,4 +19,15 @@
       <Filter>ソース ファイル</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <None Include="shaders\shader.frag">
+      <Filter>ソース ファイル</Filter>
+    </None>
+    <None Include="shaders\shader.vert">
+      <Filter>ソース ファイル</Filter>
+    </None>
+    <None Include="shaders\compile.bat">
+      <Filter>ソース ファイル</Filter>
+    </None>
+  </ItemGroup>
 </Project>
