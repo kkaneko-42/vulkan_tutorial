@@ -5,6 +5,7 @@
 #include <GLFW/glfw3native.h>
 
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <map>
 #include <set>
@@ -144,6 +145,51 @@ private:
 		createLogicalDevice();
 		createSwapChain(); // 論理デバイス作成後に呼ぶ
 		createImageViews();
+		createGraphicsPipeline();
+	}
+
+	void createGraphicsPipeline() {
+		auto vertShaderCode = readFile("shaders/vert.spv");
+		auto fragShaderCode = readFile("shaders/frag.spv");
+
+		VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+		VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+		VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+		vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		// 当該shaderが、どのパイプラインステージで利用されるか
+		vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+		// 利用されるshader module
+		vertShaderStageInfo.module = vertShaderModule;
+		// entrypoint
+		vertShaderStageInfo.pName = "main";
+		// 他にも、pSpecializationInfoでシェーダー定数を設定できる
+
+		VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+		fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+		fragShaderStageInfo.module = fragShaderModule;
+		fragShaderStageInfo.pName = "main";
+
+		VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+		vkDestroyShaderModule(_device, vertShaderModule, nullptr);
+		vkDestroyShaderModule(_device, fragShaderModule, nullptr);
+	}
+
+	VkShaderModule createShaderModule(const std::vector<char>& code) {
+		VkShaderModuleCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfo.codeSize = code.size();
+		createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+		VkShaderModule shaderModule;
+		VkResult result = vkCreateShaderModule(_device, &createInfo, nullptr, &shaderModule);
+		if (result != VK_SUCCESS) {
+			throw std::runtime_error("failed to create shader module!");
+		}
+
+		return shaderModule;
 	}
 
 	void createImageViews() {
@@ -709,6 +755,28 @@ private:
 		std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
 
 		return VK_FALSE;
+	}
+
+	static std::vector<char> readFile(const std::string& filename) {
+		std::ifstream file(
+			filename,
+			std::ios::ate | /* 末尾から読む */
+			std::ios::binary /* バイナリを読む */
+		);
+
+		if (!file.is_open()) {
+			throw std::runtime_error("failed to open file!");
+		}
+
+		// 末尾から読むので、現在位置がファイルサイズと等しい
+		std::size_t fileSize = static_cast<std::size_t>(file.tellg());
+		std::vector<char> buffer(fileSize);
+
+		file.seekg(0);
+		file.read(buffer.data(), fileSize);
+		file.close();
+
+		return buffer;
 	}
 };
 
